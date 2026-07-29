@@ -30,6 +30,12 @@ tabletroom_viewer/
 
 ## Configuración
 
+- **Sala de la tablet**: en la primera ejecución la app consulta `GET /salas`
+  y muestra un selector; la sala elegida queda guardada en el dispositivo
+  (`shared_preferences`). Para cambiarla después: **mantener presionado el
+  logo Inarco** en el header → confirmar → vuelve el selector. Una misma APK
+  sirve para todas las salas. Si el backend no soporta `/salas`, se puede
+  continuar con la sala por defecto del servidor.
 - `BACKEND_URL`: se inyecta en compilación con `--dart-define`. Por defecto
   `http://10.0.2.2:8000` (localhost del host desde el emulador Android).
 - Intervalo de polling: `kRefreshSeconds = 30` (en `screens/agenda_screen.dart`).

@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:intl/date_symbol_data_local.dart';
 
 import 'screens/agenda_screen.dart';
+import 'screens/room_setup_screen.dart';
+import 'services/room_config.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -11,8 +13,14 @@ void main() async {
     [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight],
   );
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-  runApp(const MaterialApp(
+
+  // Sala guardada en el dispositivo: si no hay, se muestra el selector inicial.
+  final saved = await RoomConfig.load();
+
+  runApp(MaterialApp(
     debugShowCheckedModeBanner: false,
-    home: AgendaScreen(),
+    home: saved == null
+        ? const RoomSetupScreen()
+        : AgendaScreen(roomUpn: saved.upn, roomName: saved.name),
   ));
 }

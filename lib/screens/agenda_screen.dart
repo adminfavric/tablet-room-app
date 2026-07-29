@@ -8,6 +8,8 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../models/agenda.dart';
 import '../services/agenda_service.dart';
 import '../services/reservation_service.dart';
+import '../services/room_config.dart';
+import 'room_setup_screen.dart';
 
 const int kRefreshSeconds = 30;
 
@@ -33,7 +35,11 @@ const _kick = Color(0xFF9A7B10); // dorado legible sobre claro (kickers)
 const _fieldBg = Color(0xFFF3F0E8);
 
 class AgendaScreen extends StatefulWidget {
-  const AgendaScreen({super.key});
+  /// UPN de la sala asignada a esta tablet; vacío → sala por defecto del backend.
+  final String roomUpn;
+  final String roomName;
+
+  const AgendaScreen({super.key, this.roomUpn = '', this.roomName = 'Tablet Room'});
 
   @override
   State<AgendaScreen> createState() => _AgendaScreenState();
@@ -70,7 +76,7 @@ class _AgendaScreenState extends State<AgendaScreen> {
 
   Future<void> _load() async {
     try {
-      final data = await _service.fetchAgenda();
+      final data = await _service.fetchAgenda(room: widget.roomUpn);
       if (!mounted) return;
       setState(() {
         _data = data;
@@ -98,7 +104,11 @@ class _AgendaScreenState extends State<AgendaScreen> {
     final ok = await showDialog<bool>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: .55),
-      builder: (_) => _ReserveDialog(now: _display),
+      builder: (_) => _ReserveDialog(
+        now: _display,
+        roomUpn: widget.roomUpn,
+        roomName: widget.roomName,
+      ),
     );
     if (ok == true && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -169,7 +179,10 @@ class _AgendaScreenState extends State<AgendaScreen> {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        _InarcoLogo(size: 40 * s),
+        GestureDetector(
+          onLongPress: _openChangeRoom,
+          child: _InarcoLogo(size: 40 * s),
+        ),
         const Spacer(),
         Column(
           children: [
@@ -177,7 +190,7 @@ class _AgendaScreenState extends State<AgendaScreen> {
                 style: TextStyle(
                     color: _gold, fontSize: 10 * s, fontWeight: FontWeight.w700, letterSpacing: 3 * s)),
             SizedBox(height: 3 * s),
-            Text(_roomLabel(d?.room ?? ''),
+            Text(widget.roomName,
                 style: TextStyle(
                     color: const Color(0xFFE9EEFB), fontSize: 18 * s, fontWeight: FontWeight.w600)),
           ],
@@ -581,14 +594,161 @@ class _AgendaScreenState extends State<AgendaScreen> {
         ),
       );
 
-  String _roomLabel(String upn) => 'Tablet Room';
+  /// PIN de administración del día: "00" + día del mes con dos dígitos.
+  /// Ej: el 29 del mes → "0029". Usa la hora del backend (Chile), no la del equipo.
+  String get _adminPin => '00${_display.day.toString().padLeft(2, '0')}';
+
+  /// Mantener presionado el logo Inarco → cambiar la sala de esta tablet.
+  /// Pide el PIN del día para evitar cambios accidentales o de terceros;
+  /// si es correcto, borra la sala guardada y vuelve al selector inicial.
+  Future<void> _openChangeRoom() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: .55),
+      builder: (_) => _PinDialog(expected: _adminPin, roomName: widget.roomName),
+    );
+    if (ok != true || !mounted) return;
+    await RoomConfig.clear();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => const RoomSetupScreen()),
+    );
+  }
+
   String _capitalize(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+}
+
+// ==================== Popup de PIN (cambiar sala) ====================
+class _PinDialog extends StatefulWidget {
+  final String expected;
+  final String roomName;
+  const _PinDialog({required this.expected, required this.roomName});
+
+  @override
+  State<_PinDialog> createState() => _PinDialogState();
+}
+
+class _PinDialogState extends State<_PinDialog> {
+  final _pin = TextEditingController();
+  String? _err;
+
+  @override
+  void dispose() {
+    _pin.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (_pin.text.trim() == widget.expected) {
+      Navigator.of(context).pop(true);
+    } else {
+      setState(() => _err = 'PIN incorrecto');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: _panel,
+      insetPadding: const EdgeInsets.all(24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 380),
+        child: Padding(
+          padding: const EdgeInsets.all(26),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Cambiar sala',
+                  style: TextStyle(color: _ink, fontSize: 22, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 4),
+              Text('Configurada como "${widget.roomName}"',
+                  style: const TextStyle(color: _inkMute2, fontSize: 13)),
+              const SizedBox(height: 20),
+              const Text('PIN DE ADMINISTRACIÓN',
+                  style: TextStyle(
+                      color: _inkMute2, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _pin,
+                autofocus: true,
+                obscureText: true,
+                keyboardType: TextInputType.number,
+                maxLength: 4,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    color: _ink, fontSize: 26, fontWeight: FontWeight.w800, letterSpacing: 12),
+                decoration: InputDecoration(
+                  counterText: '',
+                  hintText: '····',
+                  hintStyle: const TextStyle(color: _inkMute2),
+                  filled: true,
+                  fillColor: _fieldBg,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                  enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                  focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: _navy, width: 1.6)),
+                ),
+                onSubmitted: (_) => _submit(),
+                onChanged: (_) {
+                  if (_err != null) setState(() => _err = null);
+                },
+              ),
+              if (_err != null) ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Icon(Icons.error_outline, color: _busy, size: 16),
+                    const SizedBox(width: 6),
+                    Text(_err!,
+                        style: const TextStyle(
+                            color: _busy, fontSize: 13.5, fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ],
+              const SizedBox(height: 22),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: const Text('Cancelar',
+                        style: TextStyle(
+                            color: _inkSoft2, fontSize: 15, fontWeight: FontWeight.w600)),
+                  ),
+                  const Spacer(),
+                  FilledButton(
+                    onPressed: _submit,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _navy,
+                      padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    child: const Text('Confirmar',
+                        style: TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ==================== Popup de reserva ====================
 class _ReserveDialog extends StatefulWidget {
   final DateTime now; // hora de pared (Chile)
-  const _ReserveDialog({required this.now});
+  final String roomUpn;
+  final String roomName;
+  const _ReserveDialog({required this.now, required this.roomUpn, required this.roomName});
 
   @override
   State<_ReserveDialog> createState() => _ReserveDialogState();
@@ -652,7 +812,8 @@ class _ReserveDialogState extends State<_ReserveDialog> {
       _sending = true;
       _err = null;
     });
-    final res = await _service.reserve(subject: subj, start: _start, end: _end);
+    final res = await _service.reserve(
+        subject: subj, start: _start, end: _end, room: widget.roomUpn);
     if (!mounted) return;
     if (res.ok) {
       Navigator.of(context).pop(true);
@@ -687,8 +848,8 @@ class _ReserveDialogState extends State<_ReserveDialog> {
                     const Text('Reservar sala',
                         style: TextStyle(color: _ink, fontSize: 24, fontWeight: FontWeight.w800)),
                     const SizedBox(height: 4),
-                    const Text('Tablet Room · hoy',
-                        style: TextStyle(color: _inkMute2, fontSize: 13)),
+                    Text('${widget.roomName} · hoy',
+                        style: const TextStyle(color: _inkMute2, fontSize: 13)),
                     const SizedBox(height: 22),
                     _label('TÍTULO'),
                     const SizedBox(height: 7),

@@ -17,10 +17,12 @@ class ReservationResult {
 
 class ReservationService {
   /// Envía la reserva al backend. `start`/`end` son hora de pared (Chile).
+  /// [room] es el UPN de la sala; vacío/null → sala por defecto del backend.
   Future<ReservationResult> reserve({
     required String subject,
     required DateTime start,
     required DateTime end,
+    String? room,
   }) async {
     try {
       final resp = await http
@@ -34,6 +36,7 @@ class ReservationService {
               'subject': subject,
               'start': _isoLocal(start),
               'end': _isoLocal(end),
+              if (room != null && room.isNotEmpty) 'room': room,
             }),
           )
           .timeout(const Duration(seconds: 15));
