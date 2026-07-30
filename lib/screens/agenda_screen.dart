@@ -13,6 +13,11 @@ import 'room_setup_screen.dart';
 
 const int kRefreshSeconds = 30;
 
+/// Forzar el estado visual para demos o fotos (spec §7):
+///   flutter run --dart-define=ROOM_STATE=busy|soon|free
+/// Vacío (default) = estado real según la agenda.
+const String kForceState = String.fromEnvironment('ROOM_STATE', defaultValue: '');
+
 // --- Paleta Inarco ---
 // Marca / header oscuro
 const _navy = Color(0xFF0F1E3D);
@@ -22,6 +27,7 @@ const _gold = Color(0xFFF5C21F);
 // Estados
 const _free = Color(0xFF1E8E3E);
 const _busy = Color(0xFFC7362B);
+const _soon = Color(0xFFD08A16); // ámbar: próxima reunión en ≤15 min
 // Inks sobre header oscuro
 const _inkSoft = Color(0xFF9FB0CF);
 // Cuerpo claro
@@ -33,6 +39,9 @@ const _inkMute2 = Color(0xFF8A93A6); // terciario
 const _line = Color(0x14000000); // bordes sutiles
 const _kick = Color(0xFF9A7B10); // dorado legible sobre claro (kickers)
 const _fieldBg = Color(0xFFF3F0E8);
+
+/// Estado visual de la sala: ocupada, por iniciar (próxima en ≤15 min) o libre.
+enum _RoomState { busy, soon, free }
 
 class AgendaScreen extends StatefulWidget {
   /// UPN de la sala asignada a esta tablet; vacío → sala por defecto del backend.
@@ -99,6 +108,47 @@ class _AgendaScreenState extends State<AgendaScreen> {
   }
 
   String _hm(DateTime t) => DateFormat('HH:mm').format(t);
+
+  _RoomState _stateOf(Agenda d) {
+    switch (kForceState) {
+      case 'busy':
+        return _RoomState.busy;
+      case 'soon':
+        return _RoomState.soon;
+      case 'free':
+        return _RoomState.free;
+    }
+    if (d.ocupada) return _RoomState.busy;
+    final next = d.next;
+    if (next != null && next.start.difference(_display).inMinutes <= 15) {
+      return _RoomState.soon;
+    }
+    return _RoomState.free;
+  }
+
+  Color _accent(_RoomState st) => switch (st) {
+        _RoomState.busy => _busy,
+        _RoomState.soon => _soon,
+        _RoomState.free => _free,
+      };
+
+  /// Minutos (hacia arriba) desde ahora hasta [t]; nunca negativo.
+  int _minsUntil(DateTime t) {
+    final m = (t.difference(_display).inSeconds / 60).ceil();
+    return m < 0 ? 0 : m;
+  }
+
+  /// Hora en que la sala queda libre: fin de la reunión en curso, extendido
+  /// por reuniones encadenadas sin hueco entre medio.
+  String _freeAtLabel(Agenda d) {
+    if (!d.ocupada || d.current == null) return 'Ahora';
+    var end = d.current!.end;
+    final sorted = [...d.events]..sort((a, b) => a.start.compareTo(b.start));
+    for (final e in sorted) {
+      if (!e.start.isAfter(end) && e.end.isAfter(end)) end = e.end;
+    }
+    return _hm(end);
+  }
 
   Future<void> _openReserve() async {
     final ok = await showDialog<bool>(
@@ -169,7 +219,11 @@ class _AgendaScreenState extends State<AgendaScreen> {
               child: _topBar(d, s),
             ),
           ),
-          _Hazard(height: 6 * s, margin: EdgeInsets.zero),
+          // Barra de acento: toma el color del estado actual de la sala.
+          Container(
+            height: 6 * s,
+            color: d == null ? _gold : _accent(_stateOf(d)),
+          ),
         ],
       ),
     );
@@ -271,7 +325,20 @@ class _AgendaScreenState extends State<AgendaScreen> {
   }
 
   Widget _statusBlock(Agenda d, double s) {
-    final accent = d.ocupada ? _busy : _free;
+    final st = _stateOf(d);
+    final accent = _accent(st);
+    final word = switch (st) {
+      _RoomState.busy => 'OCUPADA',
+      _RoomState.soon => 'POR INICIAR',
+      _RoomState.free => 'LIBRE',
+    };
+    final subtitle = switch (st) {
+      _RoomState.busy => 'Reunión en curso',
+      _RoomState.soon => d.next == null
+          ? 'Reunión por comenzar'
+          : 'Próxima reunión en ${_minsUntil(d.next!.start)} min',
+      _RoomState.free => 'Sala disponible ahora',
+    };
     return Container(
       decoration: BoxDecoration(
         color: _panel,
@@ -294,14 +361,14 @@ class _AgendaScreenState extends State<AgendaScreen> {
                 children: [
                   Row(
                     children: [
-                      _Dot(color: accent, size: 22 * s),
+                      _PulsingDot(color: accent, size: 22 * s),
                       SizedBox(width: 16 * s),
                       Flexible(
                         child: FittedBox(
                           fit: BoxFit.scaleDown,
                           alignment: Alignment.centerLeft,
                           child: Text(
-                            d.ocupada ? 'OCUPADA' : 'LIBRE',
+                            word,
                             style: TextStyle(
                               color: accent,
                               fontSize: 108 * s,
@@ -316,11 +383,11 @@ class _AgendaScreenState extends State<AgendaScreen> {
                   ),
                   SizedBox(height: 8 * s),
                   Text(
-                    d.ocupada ? 'Reunión en curso' : 'Sala disponible ahora',
+                    subtitle,
                     style: TextStyle(color: _inkSoft2, fontSize: 22 * s, fontWeight: FontWeight.w500),
                   ),
                   const Spacer(),
-                  _detail(d, s, accent),
+                  _detail(d, s, accent, st),
                   SizedBox(height: 18 * s),
                   _reserveButton(s),
                 ],
@@ -359,15 +426,15 @@ class _AgendaScreenState extends State<AgendaScreen> {
     );
   }
 
-  Widget _detail(Agenda d, double s, Color accent) {
+  Widget _detail(Agenda d, double s, Color accent, _RoomState st) {
     final current = d.current;
     final next = d.next;
 
     Widget nowCard;
-    if (current != null) {
+    if (st == _RoomState.busy && current != null) {
       final total = current.end.difference(current.start).inSeconds;
       final done = _display.difference(current.start).inSeconds;
-      final frac = total <= 0 ? 0.0 : (done / total).clamp(0.0, 1.0);
+      final frac = total <= 0 ? 0.02 : (done / total).clamp(0.02, 1.0);
       nowCard = _card(s, children: [
         _kicker('AHORA EN LA SALA', s),
         SizedBox(height: 8 * s),
@@ -379,6 +446,7 @@ class _AgendaScreenState extends State<AgendaScreen> {
         _metaRow([
           if (current.organizer.isNotEmpty) _meta('Organiza', current.organizer, s),
           _meta('Termina', _hm(current.end), s),
+          _metric('Quedan ${_minsUntil(current.end)} min', accent, s),
         ], s),
         SizedBox(height: 16 * s),
         ClipRRect(
@@ -391,16 +459,33 @@ class _AgendaScreenState extends State<AgendaScreen> {
           ),
         ),
       ]);
+    } else if (next != null) {
+      final soon = st == _RoomState.soon;
+      nowCard = _card(s, children: [
+        _kicker(soon ? 'A CONTINUACIÓN' : 'SIGUIENTE RESERVA', s),
+        SizedBox(height: 8 * s),
+        Text(next.subject,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: _ink, fontSize: 30 * s, height: 1.1, fontWeight: FontWeight.w700)),
+        SizedBox(height: 12 * s),
+        _metaRow([
+          if (next.organizer.isNotEmpty) _meta('Organiza', next.organizer, s),
+          _meta('Horario', '${_hm(next.start)}–${_hm(next.end)}', s),
+          _metric(
+              soon
+                  ? 'Comienza en ${_minsUntil(next.start)} min'
+                  : 'Libre por ${_minsUntil(next.start)} min',
+              accent,
+              s),
+        ], s),
+      ]);
     } else {
       nowCard = _card(s, children: [
         _kicker('DISPONIBLE', s),
         SizedBox(height: 8 * s),
-        Text(next == null ? 'Sin más reuniones hoy' : 'Sin reunión en curso',
+        Text('Sin más reuniones hoy',
             style: TextStyle(color: _ink, fontSize: 30 * s, height: 1.1, fontWeight: FontWeight.w700)),
-        if (next != null) ...[
-          SizedBox(height: 12 * s),
-          _metaRow([_meta('Libre hasta', _hm(next.start), s)], s),
-        ],
       ]);
     }
 
@@ -408,7 +493,7 @@ class _AgendaScreenState extends State<AgendaScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         nowCard,
-        if (next != null) ...[
+        if (st == _RoomState.busy && next != null) ...[
           SizedBox(height: 16 * s),
           Row(
             children: [
@@ -480,6 +565,30 @@ class _AgendaScreenState extends State<AgendaScreen> {
                     itemBuilder: (_, i) => _eventRow(d, d.events[i], s),
                   ),
           ),
+          SizedBox(height: 14 * s),
+          Container(
+            width: double.infinity,
+            padding: EdgeInsets.symmetric(horizontal: 14 * s, vertical: 11 * s),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFAF8F3),
+              borderRadius: BorderRadius.circular(11 * s),
+              border: Border.all(color: _line),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('PRÓXIMA DISPONIBILIDAD',
+                    style: TextStyle(
+                        color: _inkMute2, fontSize: 10 * s, fontWeight: FontWeight.w800, letterSpacing: 2 * s)),
+                Text(_freeAtLabel(d),
+                    style: TextStyle(
+                        color: _ink,
+                        fontSize: 15 * s,
+                        fontWeight: FontWeight.w800,
+                        fontFeatures: const [FontFeature.tabularFigures()])),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -489,6 +598,19 @@ class _AgendaScreenState extends State<AgendaScreen> {
     final live = d.current != null && e.start == d.current!.start;
     final done = !live && e.end.isBefore(_display);
 
+    Widget chip(String t, Color fg, Color bg) => Container(
+          padding: EdgeInsets.symmetric(horizontal: 10 * s, vertical: 3.5 * s),
+          decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20 * s)),
+          child: Text(t,
+              style: TextStyle(color: fg, fontSize: 11 * s, fontWeight: FontWeight.w700, letterSpacing: .4)),
+        );
+
+    final estado = live
+        ? chip('En curso', _busy, const Color(0xFFF6DEDA))
+        : done
+            ? chip('Finalizada', _inkMute2, const Color(0xFFF1EEE7))
+            : chip('Programada', _inkSoft2, const Color(0xFFF1EEE7));
+
     return Container(
       padding: EdgeInsets.symmetric(horizontal: 16 * s, vertical: 13 * s),
       decoration: BoxDecoration(
@@ -497,7 +619,7 @@ class _AgendaScreenState extends State<AgendaScreen> {
         border: Border.all(color: live ? const Color(0x66C7362B) : Colors.transparent),
       ),
       child: Opacity(
-        opacity: done ? 0.4 : 1,
+        opacity: done ? 0.45 : 1,
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -535,10 +657,8 @@ class _AgendaScreenState extends State<AgendaScreen> {
                 ],
               ),
             ),
-            if (live) ...[
-              SizedBox(width: 8 * s),
-              Padding(padding: EdgeInsets.only(top: 4 * s), child: _Dot(color: _busy, size: 10 * s)),
-            ],
+            SizedBox(width: 10 * s),
+            Padding(padding: EdgeInsets.only(top: 2 * s), child: estado),
           ],
         ),
       ),
@@ -580,6 +700,10 @@ class _AgendaScreenState extends State<AgendaScreen> {
 
   Widget _kicker(String t, double s) => Text(t,
       style: TextStyle(color: _kick, fontSize: 11 * s, fontWeight: FontWeight.w800, letterSpacing: 2.6 * s));
+
+  /// Métrica destacada del estado ("Quedan 20 min", "Comienza en 8 min"…).
+  Widget _metric(String t, Color accent, double s) => Text(t,
+      style: TextStyle(color: accent, fontSize: 16 * s, fontWeight: FontWeight.w800));
 
   Widget _metaRow(List<Widget> items, double s) =>
       Wrap(spacing: 22 * s, runSpacing: 6 * s, children: items);
@@ -1033,6 +1157,35 @@ class _Dot extends StatelessWidget {
           color: color,
           boxShadow: [BoxShadow(color: color.withValues(alpha: .3), blurRadius: 0, spreadRadius: size * .28)],
         ),
+      );
+}
+
+/// Punto de estado con pulso suave; única animación de la pantalla.
+class _PulsingDot extends StatefulWidget {
+  final Color color;
+  final double size;
+  const _PulsingDot({required this.color, required this.size});
+
+  @override
+  State<_PulsingDot> createState() => _PulsingDotState();
+}
+
+class _PulsingDotState extends State<_PulsingDot> with SingleTickerProviderStateMixin {
+  late final AnimationController _c =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 2400))
+        ..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+        opacity: Tween(begin: 1.0, end: .45)
+            .animate(CurvedAnimation(parent: _c, curve: Curves.easeInOut)),
+        child: _Dot(color: widget.color, size: widget.size),
       );
 }
 
