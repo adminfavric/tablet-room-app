@@ -13,6 +13,11 @@ import 'room_setup_screen.dart';
 
 const int kRefreshSeconds = 30;
 
+/// Minutos de inactividad (sin toques) antes de pasar al modo descanso
+/// anti burn-in. Configurable al compilar: --dart-define=SAVER_MINUTES=15.
+/// 0 = deshabilitado.
+const int kSaverMinutes = int.fromEnvironment('SAVER_MINUTES', defaultValue: 15);
+
 /// Forzar el estado visual para demos o fotos (spec §7):
 ///   flutter run --dart-define=ROOM_STATE=busy|soon|free
 /// Vacío (default) = estado real según la agenda.
@@ -67,6 +72,10 @@ class _AgendaScreenState extends State<AgendaScreen> {
   DateTime _syncedAt = DateTime.now();
   DateTime _display = DateTime.now();
 
+  // Anti burn-in: modo descanso tras inactividad + micro-desplazamiento de la UI.
+  DateTime _lastTouch = DateTime.now();
+  bool _saver = false;
+
   @override
   void initState() {
     super.initState();
@@ -80,8 +89,33 @@ class _AgendaScreenState extends State<AgendaScreen> {
         _display = base == null
             ? DateTime.now()
             : base.add(DateTime.now().difference(_syncedAt));
+        if (kSaverMinutes > 0 &&
+            !_saver &&
+            DateTime.now().difference(_lastTouch).inMinutes >= kSaverMinutes) {
+          _saver = true;
+        }
       });
     });
+  }
+
+  void _wake() {
+    _lastTouch = DateTime.now();
+    if (_saver) setState(() => _saver = false);
+  }
+
+  /// Micro-desplazamiento de toda la UI (0–3 px), rota cada 4 minutos.
+  /// Imperceptible, pero evita que los bordes fijos se graben siempre en las
+  /// mismas filas de píxeles.
+  Offset get _pixelShift {
+    const steps = [
+      Offset(0, 0),
+      Offset(2, 1),
+      Offset(3, 2),
+      Offset(1, 3),
+      Offset(0, 2),
+      Offset(2, 0),
+    ];
+    return steps[(_display.minute ~/ 4) % steps.length];
   }
 
   Future<void> _load() async {
@@ -177,27 +211,44 @@ class _AgendaScreenState extends State<AgendaScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: _navy,
-      body: LayoutBuilder(
-        builder: (context, c) {
-          // Escala relativa a ancho Y alto (responsivo a cualquier tablet).
-          final s = math.min(c.maxWidth / 1280, c.maxHeight / 820).clamp(0.5, 1.7);
-          final d = _data;
-          return Column(
-            children: [
-              _header(d, s),
-              Expanded(
-                child: Container(
-                  color: _bg,
-                  child: SafeArea(
-                    top: false,
-                    child: d == null ? _loading(s) : _body(d, s),
+      backgroundColor: _saver ? Colors.black : _navy,
+      body: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) => _wake(),
+        child: LayoutBuilder(
+          builder: (context, c) {
+            // Escala relativa a ancho Y alto (responsivo a cualquier tablet).
+            final s = math.min(c.maxWidth / 1280, c.maxHeight / 820).clamp(0.5, 1.7);
+            final d = _data;
+            if (_saver) {
+              return _AmbientSaver(
+                now: _display,
+                state: d == null ? _RoomState.free : _stateOf(d),
+                hasData: d != null,
+                roomName: widget.roomName,
+                next: d?.next,
+                scale: s,
+              );
+            }
+            return Transform.translate(
+              offset: _pixelShift,
+              child: Column(
+                children: [
+                  _header(d, s),
+                  Expanded(
+                    child: Container(
+                      color: _bg,
+                      child: SafeArea(
+                        top: false,
+                        child: d == null ? _loading(s) : _body(d, s),
+                      ),
+                    ),
                   ),
-                ),
+                ],
               ),
-            ],
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -769,6 +820,135 @@ class _AgendaScreenState extends State<AgendaScreen> {
   }
 
   String _capitalize(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+}
+
+// ==================== Modo descanso (anti burn-in) ====================
+/// Pantalla negra con reloj y estado de la sala en grande. Se muestra tras
+/// [kSaverMinutes] sin toques; cualquier toque vuelve a la agenda (lo maneja
+/// el Listener del AgendaScreen). En pantallas OLED el fondo negro apaga los
+/// píxeles; el bloque de contenido cambia de posición cada 25 s y de noche
+/// (21:00–07:00) baja su intensidad.
+class _AmbientSaver extends StatefulWidget {
+  final DateTime now;
+  final _RoomState state;
+  final bool hasData; // false = aún sin conexión, no afirmar LIBRE/OCUPADA
+  final String roomName;
+  final Event? next;
+  final double scale;
+
+  const _AmbientSaver({
+    required this.now,
+    required this.state,
+    required this.hasData,
+    required this.roomName,
+    required this.next,
+    required this.scale,
+  });
+
+  @override
+  State<_AmbientSaver> createState() => _AmbientSaverState();
+}
+
+class _AmbientSaverState extends State<_AmbientSaver> {
+  static const _spots = [
+    Alignment(-0.6, -0.5),
+    Alignment(0.6, -0.5),
+    Alignment(0.0, 0.0),
+    Alignment(-0.6, 0.5),
+    Alignment(0.6, 0.5),
+    Alignment(0.0, -0.6),
+    Alignment(0.0, 0.6),
+  ];
+
+  final _rnd = math.Random();
+  late Alignment _pos = _spots[_rnd.nextInt(_spots.length)];
+  Timer? _drift;
+
+  @override
+  void initState() {
+    super.initState();
+    _drift = Timer.periodic(const Duration(seconds: 25), (_) {
+      if (!mounted) return;
+      setState(() => _pos = _spots[_rnd.nextInt(_spots.length)]);
+    });
+  }
+
+  @override
+  void dispose() {
+    _drift?.cancel();
+    super.dispose();
+  }
+
+  String _hm(DateTime t) => DateFormat('HH:mm').format(t);
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.scale;
+    final night = widget.now.hour >= 21 || widget.now.hour < 7;
+    final accent = switch (widget.state) {
+      _RoomState.busy => _busy,
+      _RoomState.soon => _soon,
+      _RoomState.free => _free,
+    };
+    final label = switch (widget.state) {
+      _RoomState.busy => 'OCUPADA',
+      _RoomState.soon => 'POR INICIAR',
+      _RoomState.free => 'LIBRE',
+    };
+
+    return Container(
+      color: Colors.black,
+      child: AnimatedAlign(
+        alignment: _pos,
+        duration: const Duration(seconds: 4),
+        curve: Curves.easeInOut,
+        child: Opacity(
+          opacity: night ? 0.4 : 0.85,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(_hm(widget.now),
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 120 * s,
+                      height: 1,
+                      fontWeight: FontWeight.w800,
+                      fontFeatures: const [FontFeature.tabularFigures()])),
+              SizedBox(height: 10 * s),
+              Text(
+                  '${widget.roomName} · '
+                  '${DateFormat('EEEE d MMM', 'es').format(widget.now)}',
+                  style: TextStyle(color: const Color(0xFF8A93A6), fontSize: 18 * s)),
+              SizedBox(height: 26 * s),
+              if (widget.hasData) ...[
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _Dot(color: accent, size: 16 * s),
+                    SizedBox(width: 14 * s),
+                    Text(label,
+                        style: TextStyle(
+                            color: accent,
+                            fontSize: 44 * s,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 2 * s)),
+                  ],
+                ),
+                if (widget.next != null) ...[
+                  SizedBox(height: 12 * s),
+                  Text('Próxima reunión ${_hm(widget.next!.start)}',
+                      style:
+                          TextStyle(color: const Color(0xFF8A93A6), fontSize: 20 * s)),
+                ],
+              ] else
+                Text('Sin conexión',
+                    style: TextStyle(color: const Color(0xFF8A93A6), fontSize: 20 * s)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ==================== Popup de PIN (cambiar sala) ====================
