@@ -21,3 +21,6 @@ android/key.properties
 
 # Credenciales de compilacion (--dart-define-from-file); nunca commitear
 dart_defines.json
+
+.DS_Store
+.claude/

@@ -28,6 +28,7 @@ const _gold = Color(0xFFF5C21F);
 const _free = Color(0xFF1E8E3E);
 const _busy = Color(0xFFC7362B);
 const _soon = Color(0xFFD08A16); // ámbar: próxima reunión en ≤15 min
+const _lunch = Color(0xFFC96D00); // colación / almuerzo
 // Inks sobre header oscuro
 const _inkSoft = Color(0xFF9FB0CF);
 // Cuerpo claro
@@ -156,6 +157,7 @@ class _AgendaScreenState extends State<AgendaScreen> {
       barrierColor: Colors.black.withValues(alpha: .55),
       builder: (_) => _ReserveDialog(
         now: _display,
+        events: _data?.events ?? const [],
         roomUpn: widget.roomUpn,
         roomName: widget.roomName,
       ),
@@ -594,9 +596,30 @@ class _AgendaScreenState extends State<AgendaScreen> {
     );
   }
 
+  /// Reuniones de colación/almuerzo: se destacan en otro color en la agenda.
+  static bool _isLunch(Event e) {
+    final t = e.subject.toLowerCase();
+    return t.contains('colación') ||
+        t.contains('colacion') ||
+        t.contains('almuerzo');
+  }
+
   Widget _eventRow(Agenda d, Event e, double s) {
     final live = d.current != null && e.start == d.current!.start;
     final done = !live && e.end.isBefore(_display);
+    final lunch = _isLunch(e);
+
+    final Color rowBg = live
+        ? const Color(0x14C7362B)
+        : lunch
+            ? const Color(0x1AE8850C) // naranjo suave para colación/almuerzo
+            : const Color(0x05000000);
+    final Color rowBorder = live
+        ? const Color(0x66C7362B)
+        : lunch
+            ? const Color(0x55E8850C)
+            : Colors.transparent;
+    final Color timeColor = live ? _busy : (lunch ? _lunch : _ink);
 
     Widget chip(String t, Color fg, Color bg) => Container(
           padding: EdgeInsets.symmetric(horizontal: 10 * s, vertical: 3.5 * s),
@@ -614,9 +637,9 @@ class _AgendaScreenState extends State<AgendaScreen> {
     return Container(
       padding: EdgeInsets.symmetric(horizontal: 16 * s, vertical: 13 * s),
       decoration: BoxDecoration(
-        color: live ? const Color(0x14C7362B) : const Color(0x05000000),
+        color: rowBg,
         borderRadius: BorderRadius.circular(13 * s),
-        border: Border.all(color: live ? const Color(0x66C7362B) : Colors.transparent),
+        border: Border.all(color: rowBorder),
       ),
       child: Opacity(
         opacity: done ? 0.45 : 1,
@@ -627,7 +650,7 @@ class _AgendaScreenState extends State<AgendaScreen> {
               width: 54 * s,
               child: Text(_hm(e.start),
                   style: TextStyle(
-                      color: live ? _busy : _ink,
+                      color: timeColor,
                       fontSize: 19 * s,
                       fontWeight: FontWeight.w700,
                       fontFeatures: const [FontFeature.tabularFigures()])),
@@ -657,6 +680,12 @@ class _AgendaScreenState extends State<AgendaScreen> {
                 ],
               ),
             ),
+            if (lunch) ...[
+              SizedBox(width: 8 * s),
+              Padding(
+                  padding: EdgeInsets.only(top: 3 * s),
+                  child: Icon(Icons.restaurant, color: _lunch, size: 16 * s)),
+            ],
             SizedBox(width: 10 * s),
             Padding(padding: EdgeInsets.only(top: 2 * s), child: estado),
           ],
@@ -870,9 +899,15 @@ class _PinDialogState extends State<_PinDialog> {
 // ==================== Popup de reserva ====================
 class _ReserveDialog extends StatefulWidget {
   final DateTime now; // hora de pared (Chile)
+  final List<Event> events; // agenda de hoy, para proponer el primer hueco libre
   final String roomUpn;
   final String roomName;
-  const _ReserveDialog({required this.now, required this.roomUpn, required this.roomName});
+  const _ReserveDialog({
+    required this.now,
+    required this.events,
+    required this.roomUpn,
+    required this.roomName,
+  });
 
   @override
   State<_ReserveDialog> createState() => _ReserveDialogState();
@@ -889,7 +924,7 @@ class _ReserveDialogState extends State<_ReserveDialog> {
   @override
   void initState() {
     super.initState();
-    _start = _roundUp(widget.now);
+    _start = _firstFreeSlot();
   }
 
   @override
@@ -903,6 +938,18 @@ class _ReserveDialogState extends State<_ReserveDialog> {
     final base = DateTime(t.year, t.month, t.day, t.hour, t.minute);
     final add = (15 - base.minute % 15) % 15;
     return add == 0 ? base : base.add(Duration(minutes: add));
+  }
+
+  /// Primer horario disponible: parte del próximo cuarto de hora y, si cae
+  /// dentro de una reunión existente (o de varias seguidas), salta al término
+  /// de la última. Ej: son las 9:06 y hay reunión hasta las 9:30 → propone 9:30.
+  DateTime _firstFreeSlot() {
+    var t = _roundUp(widget.now);
+    final sorted = [...widget.events]..sort((a, b) => a.start.compareTo(b.start));
+    for (final e in sorted) {
+      if (!e.start.isAfter(t) && e.end.isAfter(t)) t = e.end;
+    }
+    return t;
   }
 
   DateTime get _end => _start.add(Duration(minutes: _dur));
@@ -1197,7 +1244,8 @@ class _InarcoLogo extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        CustomPaint(size: Size(size * 1.15, size), painter: _CheckPainter()),
+        Image.asset('assets/inarco_icon.png',
+            height: size * 1.15, fit: BoxFit.contain),
         SizedBox(width: size * 0.32),
         Column(
           mainAxisSize: MainAxisSize.min,
@@ -1215,34 +1263,6 @@ class _InarcoLogo extends StatelessWidget {
       ],
     );
   }
-}
-
-class _CheckPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width, h = size.height;
-    final p = Paint()..color = _gold;
-    final path = Path()
-      ..moveTo(0.06 * w, 0.56 * h)
-      ..lineTo(0.36 * w, 0.92 * h)
-      ..lineTo(0.96 * w, 0.10 * h)
-      ..lineTo(0.76 * w, 0.10 * h)
-      ..lineTo(0.35 * w, 0.66 * h)
-      ..lineTo(0.22 * w, 0.56 * h)
-      ..close();
-    canvas.drawPath(path, p);
-    final p2 = Paint()..color = _gold.withValues(alpha: .55);
-    final path2 = Path()
-      ..moveTo(0.06 * w, 0.56 * h)
-      ..lineTo(0.36 * w, 0.92 * h)
-      ..lineTo(0.44 * w, 0.75 * h)
-      ..lineTo(0.22 * w, 0.56 * h)
-      ..close();
-    canvas.drawPath(path2, p2);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _Hazard extends StatelessWidget {
